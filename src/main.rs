@@ -25,10 +25,10 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
 
-    if let Err(e) = check_tesseract() {
-        eprintln!("{}", e);
-        process::exit(1);
-    }
+    // if let Err(e) = check_tesseract() {
+    //     eprintln!("{}", e);
+    //     process::exit(1);
+    // }
 
     let db_path = Path::new(&cli.directory).join(".ocr_results.db");
     match search_and_ocr_photos(&cli.directory, cli.debug, &db_path) {
@@ -54,25 +54,25 @@ fn main() {
     }
 }
 
-fn check_tesseract() -> Result<(), String> {
-    for lib_name in &["libtesseract", "libtesseract.dylib"] {
-        if unsafe { Library::new(lib_name) }.is_ok() {
-            return Ok(());
-        }
-    }
+// fn check_tesseract() -> Result<(), String> {
+//     for lib_name in &["libtesseract", "libtesseract.dylib"] {
+//         if unsafe { Library::new(lib_name) }.is_ok() {
+//             return Ok(());
+//         }
+//     }
 
-    Err(format!(
-        "Tesseract library is missing. Please install it using:\n{}",
-        r#"On Ubuntu:
-            sudo apt-get install libtesseract-dev tesseract-ocr-eng
+//     Err(format!(
+//         "Tesseract library is missing. Please install it using:\n{}",
+//         r#"On Ubuntu:
+//             sudo apt-get install libtesseract-dev tesseract-ocr-eng
 
-        On macOS:
-            brew install tesseract
+//         On macOS:
+//             brew install tesseract
 
-        On Windows (using vcpkg):
-            vcpkg install tesseract:x64-windows"#
-    ))
-}
+//         On Windows (using vcpkg):
+//             vcpkg install tesseract:x64-windows"#
+//     ))
+// }
 
 fn init_db(conn: &Connection) -> SqliteResult<()> {
     conn.execute(
