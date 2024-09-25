@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.5.18", features = ["derive"] }
+image = "0.25.2"
 leptess    = "0.14.0"
 libloading = "0.8.5"
 rusqlite   = "0.32.1"
+tempfile = "3.12.0"

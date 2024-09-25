@@ -1,10 +1,12 @@
 use clap::Parser;
+use image::{DynamicImage, ImageFormat, ImageReader};
 use leptess::{LepTess, Variable};
-use libloading::Library;
 use rusqlite::{Connection, Result as SqliteResult};
+use std::error::Error;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process;
+use tempfile::Builder;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -85,6 +87,39 @@ fn init_db(conn: &Connection) -> SqliteResult<()> {
     Ok(())
 }
 
+fn process_image(
+    ocr: &mut LepTess,
+    conn: &Connection,
+    path: &Path,
+    image: Option<DynamicImage>,
+) -> Result<(), Box<dyn Error>> {
+    let temp_file = Builder::new().suffix(".png").tempfile()?;
+    let temp_path = temp_file.path();
+
+    if let Some(img) = image {
+        img.save_with_format(temp_path, ImageFormat::Png)?;
+    } else {
+        fs::copy(path, temp_path)?;
+    }
+
+    match ocr.set_image(temp_path) {
+        Ok(_) => match ocr.get_utf8_text() {
+            Ok(text) => {
+                let trimmed_text = text.trim();
+                if !trimmed_text.is_empty() {
+                    store_ocr_result(conn, path, trimmed_text)?;
+                } else {
+                    println!("No text found in the image.");
+                }
+            }
+            Err(e) => println!("Error getting OCR text: {}", e),
+        },
+        Err(e) => println!("Error setting image: {}", e),
+    }
+
+    Ok(())
+}
+
 fn search_and_ocr_photos(
     directory: &str,
     debug: bool,
@@ -113,20 +148,15 @@ fn search_and_ocr_photos(
                         {
                             if !file_exists_in_db(&conn, &path)? {
                                 println!("Processing file: {}", path.display());
-                                match ocr.set_image(&path) {
-                                    Ok(_) => match ocr.get_utf8_text() {
-                                        Ok(text) => {
-                                            let trimmed_text = text.trim();
-                                            if !trimmed_text.is_empty() {
-                                                store_ocr_result(&conn, &path, trimmed_text)?;
-                                            } else {
-                                                println!("No text found in the image.");
-                                            }
-                                        }
-                                        Err(e) => println!("Error getting OCR text: {}", e),
-                                    },
-                                    Err(e) => println!("Error setting image: {}", e),
-                                }
+                                process_image(&mut ocr, &conn, &path, None)?;
+                            }
+                        } else if ["webp", "heic", "heif", "avif", "jxl"]
+                            .contains(&ext_str.to_lowercase().as_str())
+                        {
+                            if !file_exists_in_db(&conn, &path)? {
+                                println!("Processing file: {}", path.display());
+                                let image = ImageReader::open(&path)?.decode()?;
+                                process_image(&mut ocr, &conn, &path, Some(image))?;
                             }
                         }
                     }
