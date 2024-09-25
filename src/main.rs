@@ -1,11 +1,10 @@
+use anyhow::{Context, Result};
 use clap::Parser;
 use image::{DynamicImage, ImageFormat, ImageReader};
 use leptess::{LepTess, Variable};
-use rusqlite::{Connection, Result as SqliteResult};
-use std::error::Error;
+use rusqlite::Connection;
 use std::fs;
 use std::path::Path;
-use std::process;
 use tempfile::Builder;
 
 #[derive(Parser)]
@@ -24,66 +23,33 @@ struct Cli {
     debug: bool,
 }
 
-fn main() {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // if let Err(e) = check_tesseract() {
-    //     eprintln!("{}", e);
-    //     process::exit(1);
-    // }
-
     let db_path = Path::new(&cli.directory).join(".ocr_results.db");
-    match search_and_ocr_photos(&cli.directory, cli.debug, &db_path) {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Error during search and OCR: {}", e);
-            process::exit(1);
-        }
-    }
+    search_and_ocr_photos(&cli.directory, cli.debug, &db_path)
+        .context("Error during search and OCR")?;
 
     if let Some(search_text) = cli.search_text {
-        match search_ocr_results(&db_path, &search_text) {
-            Ok(results) => {
-                for (filename, _) in results {
-                    println!("{}", filename);
-                }
-            }
-            Err(e) => {
-                eprintln!("Error searching OCR results: {}", e);
-                process::exit(1);
-            }
+        let results =
+            search_ocr_results(&db_path, &search_text).context("Error searching OCR results")?;
+        for (filename, _) in results {
+            println!("{}", filename);
         }
     }
+
+    Ok(())
 }
 
-// fn check_tesseract() -> Result<(), String> {
-//     for lib_name in &["libtesseract", "libtesseract.dylib"] {
-//         if unsafe { Library::new(lib_name) }.is_ok() {
-//             return Ok(());
-//         }
-//     }
-
-//     Err(format!(
-//         "Tesseract library is missing. Please install it using:\n{}",
-//         r#"On Ubuntu:
-//             sudo apt-get install libtesseract-dev tesseract-ocr-eng
-
-//         On macOS:
-//             brew install tesseract
-
-//         On Windows (using vcpkg):
-//             vcpkg install tesseract:x64-windows"#
-//     ))
-// }
-
-fn init_db(conn: &Connection) -> SqliteResult<()> {
+fn init_db(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ocr_results (
             filename TEXT PRIMARY KEY,
             text TEXT NOT NULL
         )",
         [],
-    )?;
+    )
+    .context("Failed to create table")?;
     Ok(())
 }
 
@@ -92,70 +58,77 @@ fn process_image(
     conn: &Connection,
     path: &Path,
     image: Option<DynamicImage>,
-) -> Result<(), Box<dyn Error>> {
-    let temp_file = Builder::new().suffix(".png").tempfile()?;
+) -> Result<()> {
+    let temp_file = Builder::new()
+        .suffix(".png")
+        .tempfile()
+        .context("Failed to create temporary file")?;
     let temp_path = temp_file.path();
 
     if let Some(img) = image {
-        img.save_with_format(temp_path, ImageFormat::Png)?;
+        img.save_with_format(temp_path, ImageFormat::Png)
+            .context("Failed to save image to temporary file")?;
     } else {
-        fs::copy(path, temp_path)?;
+        fs::copy(path, temp_path).context("Failed to copy image to temporary file")?;
     }
 
-    match ocr.set_image(temp_path) {
-        Ok(_) => match ocr.get_utf8_text() {
-            Ok(text) => {
-                let trimmed_text = text.trim();
-                if !trimmed_text.is_empty() {
-                    store_ocr_result(conn, path, trimmed_text)?;
-                } else {
-                    println!("No text found in the image.");
-                }
-            }
-            Err(e) => println!("Error getting OCR text: {}", e),
-        },
-        Err(e) => println!("Error setting image: {}", e),
+    ocr.set_image(temp_path)
+        .context("Failed to set image for OCR")?;
+
+    let text = ocr.get_utf8_text().context("Failed to get OCR text")?;
+
+    let trimmed_text = text.trim();
+    if !trimmed_text.is_empty() {
+        store_ocr_result(conn, path, trimmed_text).context("Failed to store OCR result")?;
+    } else {
+        println!("No text found in the image.");
     }
 
     Ok(())
 }
 
-fn search_and_ocr_photos(
-    directory: &str,
-    debug: bool,
-    db_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn search_and_ocr_photos(directory: &str, debug: bool, db_path: &Path) -> Result<()> {
     let path = Path::new(directory);
-    let mut ocr = LepTess::new(None, "eng")?;
-    ocr.set_variable(Variable::TesseditPagesegMode, "1")?;
+    let mut ocr = LepTess::new(None, "eng").context("Failed to initialize LepTess")?;
+    ocr.set_variable(Variable::TesseditPagesegMode, "1")
+        .context("Failed to set TesseditPagesegMode")?;
 
     if !debug {
-        ocr.set_variable(Variable::DebugFile, "/dev/null")?;
+        ocr.set_variable(Variable::DebugFile, "/dev/null")
+            .context("Failed to set DebugFile")?;
     }
 
-    let conn = Connection::open(db_path)?;
+    let conn = Connection::open(db_path).context("Failed to open database connection")?;
     init_db(&conn)?;
 
     if path.is_dir() {
-        for entry in fs::read_dir(path)? {
-            let entry = entry?;
+        for entry in fs::read_dir(path).context("Failed to read directory")? {
+            let entry = entry.context("Failed to read directory entry")?;
             let path = entry.path();
             if path.is_file() {
                 if let Some(extension) = path.extension() {
                     if let Some(ext_str) = extension.to_str() {
+                        let ext_lower = ext_str.to_lowercase();
                         if ["jpg", "jpeg", "png", "gif", "bmp", "tiff"]
-                            .contains(&ext_str.to_lowercase().as_str())
+                            .contains(&ext_lower.as_str())
                         {
-                            if !file_exists_in_db(&conn, &path)? {
+                            if !file_exists_in_db(&conn, &path)
+                                .context("Failed to check if file exists in database")?
+                            {
                                 println!("Processing file: {}", path.display());
                                 process_image(&mut ocr, &conn, &path, None)?;
                             }
                         } else if ["webp", "heic", "heif", "avif", "jxl"]
-                            .contains(&ext_str.to_lowercase().as_str())
+                            .contains(&ext_lower.as_str())
                         {
-                            if !file_exists_in_db(&conn, &path)? {
+                            if !file_exists_in_db(&conn, &path)
+                                .context("Failed to check if file exists in database")?
+                            {
                                 println!("Processing file: {}", path.display());
-                                let image = ImageReader::open(&path)?.decode()?;
+                                let image = ImageReader::open(&path)
+                                    .context("Failed to open image")?
+                                    .decode()
+                                    .context("Failed to decode image")?;
                                 process_image(&mut ocr, &conn, &path, Some(image))?;
                             }
                         }
@@ -168,25 +141,35 @@ fn search_and_ocr_photos(
     Ok(())
 }
 
-fn file_exists_in_db(conn: &Connection, path: &Path) -> SqliteResult<bool> {
-    let mut stmt = conn.prepare("SELECT 1 FROM ocr_results WHERE filename = ?1 LIMIT 1")?;
-    let exists = stmt.exists([path.to_string_lossy().to_string()])?;
+fn file_exists_in_db(conn: &Connection, path: &Path) -> Result<bool> {
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM ocr_results WHERE filename = ?1 LIMIT 1")
+        .context("Failed to prepare statement")?;
+    let exists = stmt
+        .exists([path.to_string_lossy().to_string()])
+        .context("Failed to check if file exists in database")?;
     Ok(exists)
 }
 
-fn store_ocr_result(conn: &Connection, path: &Path, text: &str) -> SqliteResult<()> {
+fn store_ocr_result(conn: &Connection, path: &Path, text: &str) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO ocr_results (filename, text) VALUES (?1, ?2)",
         [path.to_string_lossy().to_string(), text.to_string()],
-    )?;
+    )
+    .context("Failed to store OCR result")?;
     Ok(())
 }
 
-fn search_ocr_results(db_path: &Path, search_text: &str) -> SqliteResult<Vec<(String, String)>> {
-    let conn = Connection::open(db_path)?;
-    let mut stmt =
-        conn.prepare("SELECT filename, text FROM ocr_results WHERE text LIKE '%' || ?1 || '%'")?;
-    let results = stmt.query_map([search_text], |row| Ok((row.get(0)?, row.get(1)?)))?;
+fn search_ocr_results(db_path: &Path, search_text: &str) -> Result<Vec<(String, String)>> {
+    let conn = Connection::open(db_path).context("Failed to open database connection")?;
+    let mut stmt = conn
+        .prepare("SELECT filename, text FROM ocr_results WHERE text LIKE '%' || ?1 || '%'")
+        .context("Failed to prepare statement")?;
+    let results = stmt
+        .query_map([search_text], |row| Ok((row.get(0)?, row.get(1)?)))
+        .context("Failed to execute query")?;
 
-    results.collect()
+    results
+        .collect::<Result<Vec<_>, _>>()
+        .context("Failed to collect results")
 }
