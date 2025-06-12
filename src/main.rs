@@ -119,18 +119,14 @@ fn search_and_ocr_photos(directory: &str, debug: bool, db_path: &Path) -> Result
                                 process_image(&mut ocr, &conn, &path, None)?;
                             }
                         } else if ["webp", "heic", "heif", "avif", "jxl"]
-                            .contains(&ext_lower.as_str())
-                        {
-                            if !file_exists_in_db(&conn, &path)
-                                .context("Failed to check if file exists in database")?
-                            {
-                                println!("Processing file: {}", path.display());
-                                let image = ImageReader::open(&path)
-                                    .context("Failed to open image")?
-                                    .decode()
-                                    .context("Failed to decode image")?;
-                                process_image(&mut ocr, &conn, &path, Some(image))?;
-                            }
+                            .contains(&ext_lower.as_str()) && !file_exists_in_db(&conn, &path)
+                                .context("Failed to check if file exists in database")? {
+                            println!("Processing file: {}", path.display());
+                            let image = ImageReader::open(&path)
+                                .context("Failed to open image")?
+                                .decode()
+                                .context("Failed to decode image")?;
+                            process_image(&mut ocr, &conn, &path, Some(image))?;
                         }
                     }
                 }
