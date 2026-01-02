@@ -1,0 +1,23 @@
+# This is a configuration file for bacon, a background code checker for Rust.
+# It's used to define custom commands to run when files are changed.
+#
+# Save this file as `bacon.toml` in the root directory of your Rust project.
+# For more information, see the official documentation: https://github.com/dbrgn/bacon
+
+[jobs]
+
+# This job runs `cargo clippy --all` on every file change.
+# The `--all` flag checks all packages in the workspace.
+clippy-all = { command = ["cargo", "clippy", "--all"] }
+
+# --- Optional Alternative ---
+#
+# The `--all` flag for clippy is very broad. A more common and often
+# recommended approach is to use `--all-targets` which checks all binaries,
+# examples, tests, and benches for the current package.
+#
+# If you prefer that, you can comment out the job above and uncomment the one below.
+#
+# clippy-all-targets = { command = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"] }
+
+
