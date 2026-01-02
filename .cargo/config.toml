@@ -1,0 +1,5 @@
+[env]
+# Sets the LIBSQLITE3_FLAGS environment variable for `cargo build`.
+# This flag instructs rusqlite's build script to compile SQLite
+# with the spellfix1 extension enabled.
+LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_SPELLFIX1"

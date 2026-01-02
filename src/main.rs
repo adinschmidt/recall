@@ -1,38 +1,60 @@
+//TODO
+// - Clean up files that no longer exist
+// - Add option to wipe database
+
 use anyhow::{Context, Result};
 use clap::Parser;
-use image::{DynamicImage, ImageFormat, ImageReader};
-use leptess::{LepTess, Variable};
+use directories::ProjectDirs;
+use image::ImageReader;
+use nucleo::{Config, Matcher};
 use rusqlite::Connection;
 use std::fs;
-use std::path::Path;
-use tempfile::Builder;
+use std::path::{Path, PathBuf};
+
+mod database;
+mod ocr;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// The directory to search for photos
-    #[arg(value_name = "DIRECTORY")]
-    directory: String,
-
     /// Text to search for in OCR results
-    #[arg(value_name = "SEARCH_TEXT")]
+    #[arg(index = 1)]
     search_text: Option<String>,
+
+    /// The directory to search for photos, defaults to the current directory
+    #[arg(index = 2, default_value = ".")]
+    directory: PathBuf,
 
     /// Enable debug output
     #[arg(short, long)]
     debug: bool,
+
+    /// Perform a search across all previously OCRed files
+    #[arg(short, long)]
+    global_search: bool,
+
+    /// Number of images to process in parallel, defaults to number of CPUs
+    #[arg(short, long)]
+    num_threads: Option<usize>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let db_path = Path::new(&cli.directory).join(".ocr_results.db");
+    let Some(proj_dirs) = ProjectDirs::from("com", "adinschmidt", "recall") else {
+        anyhow::bail!("Failed to get data path");
+    };
+    let data_path = proj_dirs.data_dir();
+    fs::create_dir_all(data_path).context("Failed to create data directory")?;
+    let db_path = proj_dirs.data_dir().join("data.sqlite");
+    println!("Data file path: {:?}", db_path);
+
     search_and_ocr_photos(&cli.directory, cli.debug, &db_path)
         .context("Error during search and OCR")?;
 
     if let Some(search_text) = cli.search_text {
-        let results =
-            search_ocr_results(&db_path, &search_text).context("Error searching OCR results")?;
+        let results = search_ocr_results(&db_path, &search_text, &cli.directory, cli.global_search)
+            .context("Error searching OCR results")?;
         for (filename, _) in results {
             println!("{}", filename);
         }
@@ -41,92 +63,57 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_db(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS ocr_results (
-            filename TEXT PRIMARY KEY,
-            text TEXT NOT NULL
-        )",
-        [],
-    )
-    .context("Failed to create table")?;
-    Ok(())
-}
+fn process_image(conn: &Connection, path: &Path) -> Result<()> {
+    let image = ImageReader::open(path)
+        .context("Failed to open image")?
+        .decode()
+        .context("Failed to decode image")?;
 
-fn process_image(
-    ocr: &mut LepTess,
-    conn: &Connection,
-    path: &Path,
-    image: Option<DynamicImage>,
-) -> Result<()> {
-    let temp_file = Builder::new()
-        .suffix(".png")
-        .tempfile()
-        .context("Failed to create temporary file")?;
-    let temp_path = temp_file.path();
-
-    if let Some(img) = image {
-        img.save_with_format(temp_path, ImageFormat::Png)
-            .context("Failed to save image to temporary file")?;
-    } else {
-        fs::copy(path, temp_path).context("Failed to copy image to temporary file")?;
-    }
-
-    ocr.set_image(temp_path)
-        .context("Failed to set image for OCR")?;
-
-    let text = ocr.get_utf8_text().context("Failed to get OCR text")?;
+    let text = ocr::extract_text(&image).context("Failed to extract text from image")?;
 
     let trimmed_text = text.trim();
     if !trimmed_text.is_empty() {
         store_ocr_result(conn, path, trimmed_text).context("Failed to store OCR result")?;
     } else {
-        println!("No text found in the image.");
+        println!("No text found in the image: {}", path.display());
     }
 
     Ok(())
 }
 
-fn search_and_ocr_photos(directory: &str, debug: bool, db_path: &Path) -> Result<()> {
-    let path = Path::new(directory);
-    let mut ocr = LepTess::new(None, "eng").context("Failed to initialize LepTess")?;
-    ocr.set_variable(Variable::TesseditPagesegMode, "1")
-        .context("Failed to set TesseditPagesegMode")?;
+/// Supported image extensions for OCR
+const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"];
 
-    if !debug {
-        ocr.set_variable(Variable::DebugFile, "/dev/null")
-            .context("Failed to set DebugFile")?;
-    }
-
+fn search_and_ocr_photos(directory: &Path, _debug: bool, db_path: &Path) -> Result<()> {
     let conn = Connection::open(db_path).context("Failed to open database connection")?;
-    init_db(&conn)?;
+    database::init_db(&conn)?;
 
-    if path.is_dir() {
-        for entry in fs::read_dir(path).context("Failed to read directory")? {
-            let entry = entry.context("Failed to read directory entry")?;
+    if directory.is_dir() {
+        for entry_result in fs::read_dir(directory).context("Failed to read directory")? {
+            let entry = entry_result.context("Failed to read directory entry")?;
             let path = entry.path();
             if path.is_file() {
-                if let Some(extension) = path.extension() {
+                // Canonicalize path to store absolute paths
+                let absolute_path = match path.canonicalize() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("Failed to canonicalize path {}: {}", path.display(), e);
+                        continue;
+                    }
+                };
+
+                if let Some(extension) = absolute_path.extension() {
                     if let Some(ext_str) = extension.to_str() {
                         let ext_lower = ext_str.to_lowercase();
-                        if ["jpg", "jpeg", "png", "gif", "bmp", "tiff"]
-                            .contains(&ext_lower.as_str())
-                        {
-                            if !file_exists_in_db(&conn, &path)
-                                .context("Failed to check if file exists in database")?
+                        if SUPPORTED_EXTENSIONS.contains(&ext_lower.as_str()) {
+                            if needs_ocr(&conn, &absolute_path)
+                                .context("Failed to check if file needs OCR")?
                             {
-                                println!("Processing file: {}", path.display());
-                                process_image(&mut ocr, &conn, &path, None)?;
+                                println!("Processing file: {}", absolute_path.display());
+                                if let Err(e) = process_image(&conn, &absolute_path) {
+                                    eprintln!("Error processing {}: {}", absolute_path.display(), e);
+                                }
                             }
-                        } else if ["webp", "heic", "heif", "avif", "jxl"]
-                            .contains(&ext_lower.as_str()) && !file_exists_in_db(&conn, &path)
-                                .context("Failed to check if file exists in database")? {
-                            println!("Processing file: {}", path.display());
-                            let image = ImageReader::open(&path)
-                                .context("Failed to open image")?
-                                .decode()
-                                .context("Failed to decode image")?;
-                            process_image(&mut ocr, &conn, &path, Some(image))?;
                         }
                     }
                 }
@@ -137,35 +124,157 @@ fn search_and_ocr_photos(directory: &str, debug: bool, db_path: &Path) -> Result
     Ok(())
 }
 
-fn file_exists_in_db(conn: &Connection, path: &Path) -> Result<bool> {
+/// Checks if the file needs OCR
+///
+/// Returns true if the file does not exist in the database,
+/// or if the file exists in the database but the OCR date
+/// is older than the last modified date of the file.
+fn needs_ocr(conn: &Connection, path: &Path) -> Result<bool> {
+    let filename = path
+        .file_name()
+        .context("Failed to get filename from path")?
+        .to_string_lossy();
+    let parent_path_str = path
+        .parent()
+        .context("Failed to get parent path")?
+        .to_string_lossy();
+
     let mut stmt = conn
-        .prepare("SELECT 1 FROM ocr_results WHERE filename = ?1 LIMIT 1")
-        .context("Failed to prepare statement")?;
+        .prepare("SELECT 1 FROM ocr_results WHERE filename = ?1 AND path = ?2 LIMIT 1")
+        .context("Failed to prepare statement for file existence check")?;
     let exists = stmt
-        .exists([path.to_string_lossy().to_string()])
+        .exists(rusqlite::params![filename, parent_path_str])
         .context("Failed to check if file exists in database")?;
-    Ok(exists)
+    if !exists {
+        return Ok(true);
+    }
+    // if the file exists, check if the OCR date is older than the last modified date
+    let mut stmt = conn
+        .prepare("SELECT ocr_date FROM ocr_results WHERE filename = ?1 AND path = ?2 LIMIT 1")
+        .context("Failed to prepare statement for file existence check")?;
+    let ocr_date_str: String = stmt
+        .query_row(rusqlite::params![filename, parent_path_str], |row| {
+            row.get(0)
+        })
+        .context("Failed to get OCR date from database")?;
+    let ocr_date = chrono::DateTime::parse_from_rfc3339(&ocr_date_str)
+        .context("Failed to parse OCR date")?
+        .with_timezone(&chrono::Utc);
+    let last_modified = path
+        .metadata()
+        .context("Failed to get last modified date of file")?
+        .modified()
+        .context("Failed to get last modified date of file")?;
+    let last_modified = chrono::DateTime::<chrono::Utc>::from(last_modified);
+    if ocr_date < last_modified {
+        return Ok(true);
+    }
+    Ok(false)
 }
 
-fn store_ocr_result(conn: &Connection, path: &Path, text: &str) -> Result<()> {
+fn store_ocr_result(conn: &Connection, full_path: &Path, text: &str) -> Result<()> {
+    let filename = full_path
+        .file_name()
+        .context("Failed to get filename from path for storing")?
+        .to_string_lossy()
+        .to_string();
+    let parent_dir_path = full_path
+        .parent()
+        .context("Failed to get parent path for storing")?
+        .to_string_lossy()
+        .to_string();
+    let ocr_date = chrono::Utc::now().to_rfc3339();
+    // Assuming if this function is called, OCR was successful and text was found
+    let ocr_success = true;
+
     conn.execute(
-        "INSERT OR REPLACE INTO ocr_results (filename, text) VALUES (?1, ?2)",
-        [path.to_string_lossy().to_string(), text.to_string()],
+        "INSERT OR REPLACE INTO ocr_results (filename, path, text, ocr_date, ocr_success, ocr_engine) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![filename, parent_dir_path, text, ocr_date, ocr_success, "tesseract"],
     )
     .context("Failed to store OCR result")?;
     Ok(())
 }
 
-fn search_ocr_results(db_path: &Path, search_text: &str) -> Result<Vec<(String, String)>> {
+fn search_ocr_results(
+    db_path: &Path,
+    search_text: &str,
+    active_directory: &Path,
+    global_search: bool,
+) -> Result<Vec<(String, String)>> {
     let conn = Connection::open(db_path).context("Failed to open database connection")?;
-    let mut stmt = conn
-        .prepare("SELECT filename, text FROM ocr_results WHERE text LIKE '%' || ?1 || '%'")
-        .context("Failed to prepare statement")?;
-    let results = stmt
-        .query_map([search_text], |row| Ok((row.get(0)?, row.get(1)?)))
-        .context("Failed to execute query")?;
+    let mut matcher = Matcher::new(Config::DEFAULT);
 
-    results
-        .collect::<Result<Vec<_>, _>>()
-        .context("Failed to collect results")
+    let mut items_to_search: Vec<(String, String)> = Vec::new();
+
+    if global_search {
+        let mut stmt = conn
+            .prepare("SELECT filename, path, text FROM ocr_results")
+            .context("Failed to prepare global search statement")?;
+        let mut rows = stmt
+            .query([])
+            .context("Failed to execute global search query")?;
+
+        while let Some(row) = rows.next()? {
+            let filename: String = row.get(0)?;
+            let path_str: String = row.get(1)?;
+            let text: String = row.get(2)?;
+            let full_path = Path::new(&path_str).join(&filename);
+            items_to_search.push((full_path.to_string_lossy().into_owned(), text));
+        }
+    } else {
+        let canonical_active_dir = active_directory.canonicalize().with_context(|| {
+            format!(
+                "Failed to canonicalize active directory: {}",
+                active_directory.display()
+            )
+        })?;
+        let active_dir_str = canonical_active_dir.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to convert canonicalized active directory to string: {}",
+                canonical_active_dir.display()
+            )
+        })?;
+
+        let mut stmt = conn
+            .prepare("SELECT filename, text FROM ocr_results WHERE path = ?1")
+            .context("Failed to prepare directory-specific search statement")?;
+        let mut rows = stmt
+            .query([active_dir_str])
+            .context("Failed to execute directory-specific search query")?;
+
+        while let Some(row) = rows.next()? {
+            let filename: String = row.get(0)?;
+            let text: String = row.get(1)?;
+            let full_path = Path::new(active_dir_str).join(&filename);
+            items_to_search.push((full_path.to_string_lossy().into_owned(), text));
+        }
+    }
+
+    if items_to_search.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut ranked_results: Vec<(u16, String, String)> = Vec::new();
+    // needle is &str, haystack is &str from text_content
+
+    for (path_str, text_content) in items_to_search {
+        // first convert to a utf8 str, then to a nucleo utf32 str
+        // define buf: &mut Vec<char, Global> as a buffer
+        let mut buf = Vec::new();
+        let mut buf2 = Vec::new();
+        let text_content_as_utf32 = nucleo::Utf32Str::new(&text_content, &mut buf);
+        let search_text_as_utf32 = nucleo::Utf32Str::new(search_text, &mut buf2);
+        if let Some(match_result) = matcher.fuzzy_match(text_content_as_utf32, search_text_as_utf32)
+        {
+            ranked_results.push((match_result, path_str, text_content));
+        }
+    }
+
+    ranked_results.sort_by_key(|k| std::cmp::Reverse(k.0)); // Sort by score descending
+
+    Ok(ranked_results
+        .into_iter()
+        .take(10) // Take top 10
+        .map(|(_, path, text)| (path, text))
+        .collect())
 }

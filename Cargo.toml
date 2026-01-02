@@ -1,13 +1,22 @@
 [package]
-name    = "recall"
+name = "recall"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 anyhow = "1.0.89"
+bincode = { version = "2.0.1", features = ["serde"] }
+chrono = { version = "0.4.41", features = ["serde"] }
 clap = { version = "4.5.18", features = ["derive"] }
+directories = "6.0.0"
+dirs = "6.0.0"
 image = "0.25.2"
-leptess    = "0.14.0"
-libloading = "0.8.5"
-rusqlite   = "0.32.1"
-tempfile = "3.12.0"
+ocrs = "0.9"
+rten = "0.13"
+nucleo = "0.5.0"
+rusqlite = { version = "0.32.1", features = [
+    "bundled",
+    "functions",
+    "load_extension",
+] }
+serde = { version = "1.0.219", features = ["derive"] }
