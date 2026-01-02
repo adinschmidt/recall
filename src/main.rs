@@ -15,7 +15,7 @@ mod database;
 mod ocr;
 
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about = "Recall is a CLI tool to OCR and search for text in your photos.", long_about = None)]
 struct Cli {
     /// Text to search for in OCR results
     #[arg(index = 1)]
@@ -36,10 +36,20 @@ struct Cli {
     /// Number of images to process in parallel, defaults to number of CPUs
     #[arg(short, long)]
     num_threads: Option<usize>,
+
+    /// Show credits and license information
+    #[arg(long)]
+    credits: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.credits {
+        println!("Recall - OCR and search for text in your photos.");
+        println!("Powered by ocrs models (CC-BY-SA-4.0 by Robert Knight; see https://huggingface.co/robertknight/ocrs)");
+        return Ok(());
+    }
 
     let Some(proj_dirs) = ProjectDirs::from("com", "adinschmidt", "recall") else {
         anyhow::bail!("Failed to get data path");
