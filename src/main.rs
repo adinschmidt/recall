@@ -1,5 +1,4 @@
 //TODO
-// - Clean up files that no longer exist
 // - Add option to wipe database
 
 use anyhow::{Context, Result};
@@ -116,9 +115,34 @@ fn search_and_ocr_photos(directory: &Path, _debug: bool, db_path: &Path) -> Resu
     database::init_db(&conn)?;
 
     if directory.is_dir() {
+        let canonical_dir = directory.canonicalize().context("Failed to canonicalize directory")?;
+        let active_dir_str = canonical_dir.to_str().context("Failed to convert directory path to string")?;
+
+        // Get all existing files in the database for this directory
+        let mut known_files: std::collections::HashSet<String> = {
+            let mut stmt = conn
+                .prepare("SELECT filename FROM ocr_results WHERE path = ?1")
+                .context("Failed to prepare statement for fetching existing files")?;
+            let rows = stmt
+                .query_map(rusqlite::params![active_dir_str], |row| row.get(0))
+                .context("Failed to query existing files")?;
+            
+            let mut files = std::collections::HashSet::new();
+            for file_result in rows {
+                files.insert(file_result.context("Failed to read filename from db")?);
+            }
+            files
+        };
+
         for entry_result in fs::read_dir(directory).context("Failed to read directory")? {
             let entry = entry_result.context("Failed to read directory entry")?;
             let path = entry.path();
+            
+            // Remove the file from the set of known files if it exists
+            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                known_files.remove(filename);
+            }
+
             if path.is_file() {
                 // Canonicalize path to store absolute paths
                 let absolute_path = match path.canonicalize() {
@@ -145,6 +169,19 @@ fn search_and_ocr_photos(directory: &Path, _debug: bool, db_path: &Path) -> Resu
                     }
                 }
             }
+        }
+
+        // Prune files that are in the database but not on disk
+        if !known_files.is_empty() {
+             info!("Pruning {} orphaned files from database", known_files.len());
+             let mut delete_stmt = conn.prepare("DELETE FROM ocr_results WHERE filename = ?1 AND path = ?2")?;
+             for filename in known_files {
+                 if let Err(e) = delete_stmt.execute(rusqlite::params![filename, active_dir_str]) {
+                     error!("Failed to remove orphaned file {} from database: {}", filename, e);
+                 } else {
+                     debug!("Removed orphaned file from database: {}", filename);
+                 }
+             }
         }
     }
 
