@@ -10,6 +10,9 @@ use nucleo::{Config, Matcher};
 use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::{debug, error, info};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 mod database;
 mod ocr;
@@ -51,13 +54,27 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Console layer (stdout)
+    let console_layer = tracing_subscriber::fmt::layer()
+        .pretty()
+        .with_file(false)
+        .with_level(true);
+    let log_level_string = "debug".to_string();
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing::Level::INFO.into())
+        .parse_lossy(format!("recall={0}", &log_level_string).as_str());
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(console_layer)
+        .try_init()?;
+
     let Some(proj_dirs) = ProjectDirs::from("com", "adinschmidt", "recall") else {
         anyhow::bail!("Failed to get data path");
     };
     let data_path = proj_dirs.data_dir();
     fs::create_dir_all(data_path).context("Failed to create data directory")?;
     let db_path = proj_dirs.data_dir().join("data.sqlite");
-    println!("Data file path: {:?}", db_path);
+    debug!("Data file path: {:?}", db_path);
 
     search_and_ocr_photos(&cli.directory, cli.debug, &db_path)
         .context("Error during search and OCR")?;
@@ -85,7 +102,7 @@ fn process_image(conn: &Connection, path: &Path) -> Result<()> {
     if !trimmed_text.is_empty() {
         store_ocr_result(conn, path, trimmed_text).context("Failed to store OCR result")?;
     } else {
-        println!("No text found in the image: {}", path.display());
+        info!("No text found in the image: {}", path.display());
     }
 
     Ok(())
@@ -107,7 +124,7 @@ fn search_and_ocr_photos(directory: &Path, _debug: bool, db_path: &Path) -> Resu
                 let absolute_path = match path.canonicalize() {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("Failed to canonicalize path {}: {}", path.display(), e);
+                        error!("Failed to canonicalize path {}: {}", path.display(), e);
                         continue;
                     }
                 };
@@ -119,9 +136,9 @@ fn search_and_ocr_photos(directory: &Path, _debug: bool, db_path: &Path) -> Resu
                             if needs_ocr(&conn, &absolute_path)
                                 .context("Failed to check if file needs OCR")?
                             {
-                                println!("Processing file: {}", absolute_path.display());
+                                info!("Processing file: {}", absolute_path.display());
                                 if let Err(e) = process_image(&conn, &absolute_path) {
-                                    eprintln!("Error processing {}: {}", absolute_path.display(), e);
+                                    error!("Error processing {}: {}", absolute_path.display(), e);
                                 }
                             }
                         }
