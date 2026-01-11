@@ -1,6 +1,6 @@
-# Recall
+# SafeRecall
 
-Recall is a CLI tool to OCR and search for text in your photos.
+SafeRecall is a CLI tool to OCR and search for text in your photos.
 
 ## Features
 
